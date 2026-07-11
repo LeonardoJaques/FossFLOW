@@ -24,10 +24,12 @@ class ServerStorage implements StorageService {
   private readonly AVAILABILITY_CACHE_MS = 60000; // Re-check every 60 seconds
 
   constructor(baseUrl: string = '') {
-    // In production (Docker), use relative paths (nginx proxy)
+    // In production (Docker), use paths prefixed with PUBLIC_URL so requests
+    // still hit this app's own backend when served under a reverse-proxy
+    // subpath (e.g. "/fossflow") instead of the domain root.
     // In development, use localhost:3001
     const isDevelopment = window.location.hostname === 'localhost' && window.location.port === '3000';
-    this.baseUrl = baseUrl || (isDevelopment ? 'http://localhost:3001' : '');
+    this.baseUrl = baseUrl || (isDevelopment ? 'http://localhost:3001' : (process.env.PUBLIC_URL || ''));
   }
 
   async isAvailable(): Promise<boolean> {
