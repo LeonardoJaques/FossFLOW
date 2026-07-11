@@ -4,6 +4,11 @@ FROM node:22 AS build
 # Set the working directory in the container
 WORKDIR /app
 
+# Base path the app is served from (e.g. "/fossflow" when mounted under a
+# reverse-proxy path prefix). Leave empty to serve from the domain root.
+ARG PUBLIC_URL=""
+ENV PUBLIC_URL=${PUBLIC_URL}
+
 # Copy package files for the monorepo
 COPY package*.json ./
 COPY packages/fossflow-lib/package*.json ./packages/fossflow-lib/
