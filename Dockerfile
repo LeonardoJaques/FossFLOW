@@ -40,15 +40,11 @@ COPY nginx.conf /etc/nginx/http.d/default.conf
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
-# Create data directory for persistent storage
-RUN mkdir -p /data/diagrams
-
 # Expose ports
 EXPOSE 80 3001
 
 # Environment variables with defaults
 ENV ENABLE_SERVER_STORAGE=true
-ENV STORAGE_PATH=/data/diagrams
 ENV BACKEND_PORT=3001
 
 # Start services

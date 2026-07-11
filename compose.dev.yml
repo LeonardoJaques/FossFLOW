@@ -7,7 +7,25 @@ services:
     environment:
       - NODE_ENV=development
       - ENABLE_SERVER_STORAGE=true
-      - STORAGE_PATH=/data/diagrams
+      - DATABASE_URL=postgresql://fossflow:fossflow@postgres:5432/fossflow
       - ENABLE_GIT_BACKUP=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=fossflow
+      - POSTGRES_PASSWORD=fossflow
+      - POSTGRES_DB=fossflow
     volumes:
-      - ./diagrams:/data/diagrams
+      - fossflow_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fossflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  fossflow_pg_data:

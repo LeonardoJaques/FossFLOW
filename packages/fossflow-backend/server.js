@@ -1,23 +1,23 @@
 import express from 'express';
 import cors from 'cors';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import pg from 'pg';
 
 // Load environment variables
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const { Pool } = pg;
 
 const app = express();
 const PORT = process.env.BACKEND_PORT || 3001;
 
 // Configuration from environment variables
 const STORAGE_ENABLED = process.env.ENABLE_SERVER_STORAGE === 'true';
-const STORAGE_PATH = process.env.STORAGE_PATH || '/data/diagrams';
 const ENABLE_GIT_BACKUP = process.env.ENABLE_GIT_BACKUP === 'true';
+
+const pool = STORAGE_ENABLED
+  ? new Pool({ connectionString: process.env.DATABASE_URL })
+  : null;
 
 // Middleware
 app.use(cors());
@@ -34,72 +34,45 @@ app.get('/api/storage/status', (req, res) => {
 
 // Only enable storage endpoints if storage is enabled
 if (STORAGE_ENABLED) {
-  // Ensure storage directory exists
-  async function ensureStorageDir() {
-    try {
-      await fs.access(STORAGE_PATH);
-      console.log(`Storage directory exists: ${STORAGE_PATH}`);
-
-      // Log current files
-      const files = await fs.readdir(STORAGE_PATH);
-      console.log(`Current files in storage: ${files.length} files`);
-      if (files.length > 0) {
-        console.log('Files:', files.join(', '));
+  async function initDb(retries = 10, delay = 3000) {
+    for (let i = 1; i <= retries; i++) {
+      try {
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS diagrams (
+            id         TEXT PRIMARY KEY,
+            name       TEXT,
+            data       JSONB NOT NULL,
+            size       INTEGER NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+          )
+        `);
+        console.log('Diagrams table ready');
+        return;
+      } catch (err) {
+        console.error(`DB attempt ${i}/${retries} failed: ${err.message}`);
+        if (i === retries) throw err;
+        await new Promise((r) => setTimeout(r, delay));
       }
-    } catch {
-      console.log(`Creating storage directory: ${STORAGE_PATH}`);
-      await fs.mkdir(STORAGE_PATH, { recursive: true });
-      console.log(`Created storage directory: ${STORAGE_PATH}`);
     }
   }
 
-  // Initialize storage
-  ensureStorageDir().catch((err) => {
-    console.error('Failed to initialize storage:', err);
+  initDb().catch((err) => {
+    console.error('Failed to initialize database:', err);
   });
 
   // List all diagrams
   app.get('/api/diagrams', async (req, res) => {
     try {
-      // First check if storage directory exists
-      try {
-        await fs.access(STORAGE_PATH);
-      } catch (err) {
-        console.error(`Storage directory does not exist: ${STORAGE_PATH}`);
-        return res.json([]); // Return empty array if directory doesn't exist
-      }
-
-      const files = await fs.readdir(STORAGE_PATH);
-      console.log(`Found ${files.length} files in ${STORAGE_PATH}:`, files);
-      const diagrams = [];
-
-      for (const file of files) {
-        if (file.endsWith('.json') && file !== 'metadata.json') {
-          try {
-            const filePath = path.join(STORAGE_PATH, file);
-            const stats = await fs.stat(filePath);
-            const content = await fs.readFile(filePath, 'utf-8');
-            const data = JSON.parse(content);
-
-            // Extract name from various possible locations
-            const name = data.name || data.title || 'Untitled Diagram';
-
-            console.log(`Successfully read diagram: ${file} (name: ${name})`);
-
-            diagrams.push({
-              id: file.replace('.json', ''),
-              name: name,
-              lastModified: stats.mtime,
-              size: stats.size
-            });
-          } catch (fileError) {
-            console.error(`Error reading diagram file ${file}:`, fileError.message);
-            // Skip this file and continue with others
-            continue;
-          }
-        }
-      }
-
+      const { rows } = await pool.query(
+        'SELECT id, name, size, updated_at FROM diagrams ORDER BY updated_at DESC'
+      );
+      const diagrams = rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        lastModified: row.updated_at,
+        size: row.size
+      }));
       console.log(`Returning ${diagrams.length} diagrams`);
       res.json(diagrams);
     } catch (error) {
@@ -114,22 +87,18 @@ if (STORAGE_ENABLED) {
     console.log(`[GET /api/diagrams/${diagramId}] Loading diagram...`);
 
     try {
-      const filePath = path.join(STORAGE_PATH, `${diagramId}.json`);
-      console.log(`[GET /api/diagrams/${diagramId}] Reading from: ${filePath}`);
+      const { rows } = await pool.query('SELECT data FROM diagrams WHERE id = $1', [diagramId]);
+      if (!rows.length) {
+        console.error(`[GET /api/diagrams/${diagramId}] Diagram not found`);
+        return res.status(404).json({ error: 'Diagram not found' });
+      }
 
-      const content = await fs.readFile(filePath, 'utf-8');
-      const data = JSON.parse(content);
-
-      console.log(`[GET /api/diagrams/${diagramId}] Successfully loaded, size: ${content.length} bytes, items: ${data.items?.length || 0}`);
+      const data = rows[0].data;
+      console.log(`[GET /api/diagrams/${diagramId}] Successfully loaded, items: ${data.items?.length || 0}`);
       res.json(data);
     } catch (error) {
-      if (error.code === 'ENOENT') {
-        console.error(`[GET /api/diagrams/${diagramId}] Diagram not found`);
-        res.status(404).json({ error: 'Diagram not found' });
-      } else {
-        console.error(`[GET /api/diagrams/${diagramId}] Error reading diagram:`, error);
-        res.status(500).json({ error: 'Failed to read diagram' });
-      }
+      console.error(`[GET /api/diagrams/${diagramId}] Error reading diagram:`, error);
+      res.status(500).json({ error: 'Failed to read diagram' });
     }
   });
 
@@ -139,19 +108,24 @@ if (STORAGE_ENABLED) {
     console.log(`[PUT /api/diagrams/${diagramId}] Saving diagram...`);
 
     try {
-      const filePath = path.join(STORAGE_PATH, `${diagramId}.json`);
       const data = {
         ...req.body,
         id: diagramId,
         lastModified: new Date().toISOString()
       };
+      const name = data.name || data.title || 'Untitled Diagram';
+      const size = Buffer.byteLength(JSON.stringify(data));
 
       const iconCount = data.icons?.length || 0;
-      const importedIconCount = (data.icons || []).filter(icon => icon.collection === 'imported').length;
-      console.log(`[PUT /api/diagrams/${diagramId}] Writing to: ${filePath}`);
+      const importedIconCount = (data.icons || []).filter((icon) => icon.collection === 'imported').length;
       console.log(`[PUT /api/diagrams/${diagramId}]   Items: ${data.items?.length || 0}, Icons: ${iconCount} (${importedIconCount} imported)`);
 
-      await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+      await pool.query(
+        `INSERT INTO diagrams (id, name, data, size, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (id) DO UPDATE SET name = $2, data = $3, size = $4, updated_at = NOW()`,
+        [diagramId, name, data, size]
+      );
       console.log(`[PUT /api/diagrams/${diagramId}] Successfully saved`);
 
       // Git backup if enabled
@@ -170,17 +144,14 @@ if (STORAGE_ENABLED) {
   // Delete diagram
   app.delete('/api/diagrams/:id', async (req, res) => {
     try {
-      const filePath = path.join(STORAGE_PATH, `${req.params.id}.json`);
-      await fs.unlink(filePath);
-      
+      const { rowCount } = await pool.query('DELETE FROM diagrams WHERE id = $1', [req.params.id]);
+      if (rowCount === 0) {
+        return res.status(404).json({ error: 'Diagram not found' });
+      }
       res.json({ success: true });
     } catch (error) {
-      if (error.code === 'ENOENT') {
-        res.status(404).json({ error: 'Diagram not found' });
-      } else {
-        console.error('Error deleting diagram:', error);
-        res.status(500).json({ error: 'Failed to delete diagram' });
-      }
+      console.error('Error deleting diagram:', error);
+      res.status(500).json({ error: 'Failed to delete diagram' });
     }
   });
 
@@ -188,24 +159,28 @@ if (STORAGE_ENABLED) {
   app.post('/api/diagrams', async (req, res) => {
     try {
       const id = req.body.id || `diagram_${Date.now()}`;
-      const filePath = path.join(STORAGE_PATH, `${id}.json`);
-      
-      // Check if already exists
-      try {
-        await fs.access(filePath);
+
+      const { rows: existing } = await pool.query('SELECT 1 FROM diagrams WHERE id = $1', [id]);
+      if (existing.length) {
         return res.status(409).json({ error: 'Diagram already exists' });
-      } catch {
-        // File doesn't exist, proceed
       }
-      
+
+      const nowIso = new Date().toISOString();
       const data = {
         ...req.body,
         id,
-        created: new Date().toISOString(),
-        lastModified: new Date().toISOString()
+        created: nowIso,
+        lastModified: nowIso
       };
-      
-      await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+      const name = data.name || data.title || 'Untitled Diagram';
+      const size = Buffer.byteLength(JSON.stringify(data));
+
+      await pool.query(
+        `INSERT INTO diagrams (id, name, data, size, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+        [id, name, data, size]
+      );
+
       res.status(201).json({ success: true, id });
     } catch (error) {
       console.error('Error creating diagram:', error);
@@ -218,19 +193,19 @@ if (STORAGE_ENABLED) {
   app.get('/api/diagrams', (req, res) => {
     res.status(503).json({ error: 'Server storage is disabled' });
   });
-  
+
   app.get('/api/diagrams/:id', (req, res) => {
     res.status(503).json({ error: 'Server storage is disabled' });
   });
-  
+
   app.put('/api/diagrams/:id', (req, res) => {
     res.status(503).json({ error: 'Server storage is disabled' });
   });
-  
+
   app.delete('/api/diagrams/:id', (req, res) => {
     res.status(503).json({ error: 'Server storage is disabled' });
   });
-  
+
   app.post('/api/diagrams', (req, res) => {
     res.status(503).json({ error: 'Server storage is disabled' });
   });
@@ -241,7 +216,6 @@ app.listen(PORT, () => {
   console.log(`FossFLOW Backend Server running on port ${PORT}`);
   console.log(`Server storage: ${STORAGE_ENABLED ? 'ENABLED' : 'DISABLED'}`);
   if (STORAGE_ENABLED) {
-    console.log(`Storage path: ${STORAGE_PATH}`);
     console.log(`Git backup: ${ENABLE_GIT_BACKUP ? 'ENABLED' : 'DISABLED'}`);
   }
 });
