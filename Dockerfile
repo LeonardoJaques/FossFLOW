@@ -52,5 +52,7 @@ EXPOSE 80 3001
 ENV ENABLE_SERVER_STORAGE=true
 ENV BACKEND_PORT=3001
 
+HEALTHCHECK --interval=5s --start-period=5s CMD wget -q -O /dev/null http://localhost/api/storage/status || exit 1
+
 # Start services
 ENTRYPOINT ["/docker-entrypoint.sh"]
